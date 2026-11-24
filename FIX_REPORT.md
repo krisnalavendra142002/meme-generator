@@ -708,3 +708,89 @@ Setelah ditelusuri pada halaman simulasi pembayaran (`web/src/app/checkout/[refe
 3. Pengujian antarmuka pada browser:
    - **Skenario Berhasil**: Beli paket baru $\rightarrow$ klik "Bayar Sekarang (Simulasi)" $\rightarrow$ tombol seketika menampilkan status `"Memproses Pembayaran..."` dalam kondisi disabled $\rightarrow$ muncul banner hijau `"✅ Pembayaran berhasil! Langganan Anda aktif. Mengalihkan…"` $\rightarrow$ tombol berubah menjadi `"Lunas"` $\rightarrow$ dialihkan ke `/pricing`.
    - **Skenario Gagal/Invalid**: Buka checkout dengan referensi tidak valid (`/checkout/invalid-123`) $\rightarrow$ klik tombol $\rightarrow$ tombol menampilkan loading lalu kembali aktif disertai pesan error merah: `"Pembayaran bermasalah: pembayaran gagal atau tidak valid"` (atau HTTP 400 sesuai respons backend). Pengguna langsung mengetahui status pembayarannya.
+
+
+---
+
+## TKT-109: Kuota 20 Meme tapi Bisa Membuat 25 (Race Condition pada Pemeriksaan Kuota)
+
+### 1. Deskripsi Keluhan
+Pengguna melaporkan:
+> “Aku langganan paket 20 meme. Biar cepat selesai kerjaan aku buka enam tab sekaligus, dan ternyata aku bisa membuat 25 meme sebelum sistem menolak. Bukan komplain, tapi kalau nanti kalian kenakan biaya lebih aku gak mau ditagih. Tapi ini berarti sistem kalian bisa kebobol kuotanya kan?”
+
+### 2. Investigasi & Akar Masalah (*Root Cause*)
+Setelah ditelusuri dari alur pembuatan meme pada modul `meme` dan interaksinya dengan `subscription`:
+
+1. **Time-of-Check to Time-of-Use (TOCTOU) Race Condition**:
+   - Pada handler `PrepareUpload` (`api/internal/modules/meme/service.go`), pengecekan hak akses `s.gate.CanCreate` dan penyimpanan data `s.repo.Create` berjalan sebagai dua operasi terpisah tanpa mekanisme penguncian (*locking*) maupun transaksi atomik.
+   - Di dalam `CanCreate`, sistem membaca jumlah meme yang telah dibuat menggunakan `SELECT COUNT(*) FROM memes WHERE user_id = $1 ...`.
+   - Ketika pengguna membuka banyak tab dan menekan tombol buat meme secara bersamaan (*concurrent requests*):
+     - Semua goroutine request membaca nilai `COUNT(*)` yang sama (misal 19).
+     - Karena 19 < 20, semua request menganggap kuota masih tersedia dan lolos validasi `CanCreate`.
+     - Selanjutnya, semua request mengeksekusi `INSERT INTO memes`.
+     - Akibatnya, 6 meme baru berhasil disimpan sekaligus sehingga total meme membengkak menjadi 25 meme (kebobol 5 meme melewati batas kuota 20).
+
+2. **Pengecekan Kuota Redundan yang Memblokir Meme Terakhir**:
+   - Method `ResultUpload` dan `Complete` pada `service.go` sebelumnya juga memanggil `s.gate.CanCreate`. Padahal kedua method tersebut memproses meme yang sudah dialokasikan pada langkah `PrepareUpload`.
+   - Panggilan `CanCreate` pada tahap akhir render ini keliru karena saat meme ke-20 sedang dirender, baris meme sudah tercatat di database sehingga `MemesUsed` bernilai 20 $\ge$ 20, yang berpotensi memblokir penyelesaian meme terakhir yang sah.
+
+---
+
+### 3. Kode yang Diubah
+
+#### Backend (`api/`)
+1. **`api/internal/modules/meme/repository.go`**:
+   - Membungkus proses pembuatan meme pada fungsi `Create` dalam satu transaksi database (`tx`).
+   - Menerapkan penguncian eksklusif per pengguna menggunakan PostgreSQL transaction-level advisory lock:
+     ```sql
+     SELECT pg_advisory_xact_lock(hashtext($1))
+     ```
+     Lock ini menjamin bahwa seluruh permintaan pembuatan meme untuk pengguna yang sama akan dieksekusi secara serial (satu per satu) hingga transaksi selesai (*commit* atau *rollback*).
+   - Di dalam transaksi terkunci, sistem secara atomik memvalidasi langganan aktif pengguna dan menghitung sisa kuota (`used < maxMemes`). Jika kuota sudah habis atau langganan tidak aktif, transaksi langsung di-rollback dan mengembalikan `ErrNotSubscribedGate`.
+   - Jika kuota masih ada, data baru di-insert ke tabel `memes` dan transaksi di-commit.
+2. **`api/internal/modules/meme/service.go`**:
+   - Menghapus pemanggilan `s.gate.CanCreate` pada `ResultUpload` dan `Complete` karena kuota sudah dijamin dan dicatat secara atomik saat `PrepareUpload`. Endpoint `ResultUpload` dan `Complete` tetap aman karena memvalidasi kepemilikan meme pengguna via `GetByID` dan `SetResultURL` (`WHERE id = $1 AND user_id = $2`).
+3. **`api/internal/modules/meme/concurrency_test.go`**:
+   - Menambahkan pengujian konkurensi `TestRepository_Create_EnforcesQuotaUnderConcurrency` yang menyimulasikan 10 permintaan paralel secara serentak pada paket dengan kuota 3 meme.
+
+---
+
+### 4. Bukti Penyelesaian (*Proof of Completion*)
+
+#### A. Langkah Reproduksi Sebelum Perbaikan
+1. Berlangganan paket dengan kuota tertentu (mis. kuota 3 meme).
+2. Tembakkan 10 request pembuatan meme secara paralel (*simultaneous HTTP POST /api/v1/memes/upload*).
+3. **Hasil**: Banyak request membaca `COUNT(*)` lama pada detik yang sama $\rightarrow$ Lebih dari 3 meme berhasil dibuat di database (kuota kebobol).
+
+#### B. Langkah Reproduksi Sesudah Perbaikan
+1. Jalankan pengujian konkurensi dengan perulangan 10 kali untuk memastikan keandalan proteksi race condition:
+   ```bash
+   cd api && go test -v -count=10 -run TestRepository_Create_EnforcesQuotaUnderConcurrency ./internal/modules/meme
+   ```
+   **Output**:
+   ```
+   === RUN   TestRepository_Create_EnforcesQuotaUnderConcurrency
+   --- PASS: TestRepository_Create_EnforcesQuotaUnderConcurrency (0.08s)
+   ... (10x PASS beruntun)
+   PASS
+   ok      github.com/nyxsr/meme-portal/api/internal/modules/meme  0.787s
+   ```
+   *Dari 10 request paralel, tepat 3 request yang berhasil dibuat dan 7 request lainnya ditolak dengan `ErrNotSubscribedGate` (HTTP 403).*
+2. Jalankan seluruh test backend:
+   ```bash
+   cd api && go test -v ./...
+   ```
+   **Output**:
+   ```
+   PASS (seluruh test di internal/middleware, auth, meme, subscription, cookie lulus)
+   ```
+3. Jalankan pemeriksaan kompilasi dan linting:
+   ```bash
+   make check
+   ```
+   **Output**:
+   ```
+   cd api && go build -o bin/api ./cmd/server
+   cd web && bun run check
+   $ tsc --noEmit
+   ```

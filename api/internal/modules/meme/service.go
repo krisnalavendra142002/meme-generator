@@ -67,9 +67,6 @@ func (s *Service) PrepareUpload(ctx context.Context, userID, title, ext, content
 // ResultUpload mengembalikan presigned PUT URL untuk gambar hasil render
 // (canvas) milik meme <id>; complete kemudian menyimpan URL publiknya.
 func (s *Service) ResultUpload(ctx context.Context, userID, id string) (UploadResponse, error) {
-	if err := s.gate.CanCreate(ctx, userID); err != nil {
-		return UploadResponse{}, err
-	}
 	if _, err := s.repo.GetByID(ctx, id, userID); err != nil {
 		return UploadResponse{}, err
 	}
@@ -88,9 +85,6 @@ func (s *Service) ResultUpload(ctx context.Context, userID, id string) (UploadRe
 }
 
 func (s *Service) Complete(ctx context.Context, userID, id, resultURL string) (Meme, error) {
-	if err := s.gate.CanCreate(ctx, userID); err != nil {
-		return Meme{}, err
-	}
 	return s.repo.SetResultURL(ctx, id, userID, resultURL)
 }
 
