@@ -12,6 +12,7 @@ import { describeError } from "@/lib/errors";
 import { useMe } from "@/lib/auth";
 import {
   useCompleteMeme,
+  useDeleteMeme,
   useMemes,
   usePrepareUpload,
   useSubscriptionStatus,
@@ -119,6 +120,7 @@ export default function StudioPage() {
   const me = useMe();
   const status = useSubscriptionStatus();
   const memes = useMemes();
+  const deleteMeme = useDeleteMeme();
   const prepare = usePrepareUpload();
   const complete = useCompleteMeme();
 
@@ -337,8 +339,24 @@ export default function StudioPage() {
         {memes.data?.items?.length ? (
           <ul className="grid gap-3 sm:grid-cols-2">
             {memes.data.items.map((m) => (
-              <li key={m.id} className="space-y-1 rounded-md border p-3 text-sm">
-                <p className="font-medium">{m.title || "(tanpa judul)"}</p>
+              <li key={m.id} className="space-y-2 rounded-md border p-3 text-sm">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="font-medium truncate">{m.title || "(tanpa judul)"}</p>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive"
+                    disabled={deleteMeme.isPending}
+                    onClick={() => {
+                      if (window.confirm("Yakin ingin menghapus meme ini?")) {
+                        deleteMeme.mutate(m.id);
+                      }
+                    }}
+                  >
+                    Hapus
+                  </Button>
+                </div>
                 {m.resultUrl && (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img

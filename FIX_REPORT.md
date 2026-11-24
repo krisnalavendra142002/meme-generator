@@ -297,3 +297,166 @@ Setelah ditelusuri dari alur endpoint status langganan (`GET /api/v1/subscriptio
    {"success":false,"code":10002,"message":"unauthorized"}
    ```
    *Shared proxy tidak dapat menyajikan respons cache milik pengguna terautentikasi ke pengguna yang belum login, dan browser selalu menerima status terkini dari server.*
+
+---
+
+## TKT-107: Bisa Hapus dan Lihat Meme Orang Lain (IDOR / BOLA pada Modul Meme)
+
+### 1. Deskripsi Keluhan
+Pengguna melaporkan:
+> “Aku iseng-iseng ganti angka di URL dan ternyata aku bisa MELIHAT dan MENGHAPUS meme milik user lain. Aku sudah hapus satu sebagai bukti, tolong pulihkan. Tolong cek juga apakah ini berlaku untuk semua meme di sistem. Kalau ada yang niat jahat ini bakal jadi masalah besar.”
+
+### 2. Investigasi & Akar Masalah (*Root Cause*)
+Setelah ditelusuri alur pengelolaan meme dari database, repository, service, handler, hingga route mounting:
+
+1. **Broken Object Level Authorization (BOLA) / IDOR pada Penghapusan Meme (`DELETE /api/v1/memes/{id}`)**:
+   - Method `Delete(ctx context.Context, id, userID string)` pada `api/internal/modules/meme/repository.go` menerima parameter `userID` dari context autentikasi JWT (`middleware.UserIDFromContext`).
+   - Namun, query SQL yang dieksekusi hanya berupa:
+     ```sql
+     DELETE FROM memes WHERE id = $1
+     ```
+     Klausa `AND user_id = $2` sama sekali tidak disertakan.
+   - Akibatnya, pengguna terautentikasi mana pun dapat menghapus meme milik pengguna lain hanya dengan mengetahui atau memasukkan ID target pada URL endpoint.
+
+2. **Celah Otorisasi yang Sama pada Pembacaan dan Update Meme (`GetByID` dan `SetResultURL`)**:
+   - Pada `GetByID(ctx context.Context, id, userID string)` di `repository.go`, query SQL hanya mengecek `WHERE id = $1` tanpa memvalidasi kepemilikan `AND user_id = $2`. Selain itu, query `SELECT` memanggil 10 kolom (termasuk `updated_at`), namun destinasi `row.Scan` hanya menyediakan 9 variabel penampung sehingga method ini rentan runtime scan mismatch jika dipanggil.
+   - Pada `SetResultURL(ctx context.Context, id, userID, resultURL string)` di `repository.go`, query SQL mengeksekusi `UPDATE memes SET result_url = $2 WHERE id = $1` tanpa klausa kepemilikan `AND user_id = $3`. Akibatnya, endpoint penyelesaian render (`POST /api/v1/memes/{id}/complete`) dapat dieksploitasi untuk menimpa file hasil meme milik pengguna lain.
+
+3. **Absennya Route dan Handler `GET /api/v1/memes/{id}`**:
+   - Konstanta kode status `CodeMemeFetched = 30103` dan query sqlc `GetMemeByID` sudah tersedia di codebase, namun route `GET /api/v1/memes/{id}` belum terdaftar di `mount.go` maupun di handler/service. Pengguna yang mencoba mengakses detail spesifik meme mendapatkan respons `405 Method Not Allowed`.
+
+4. **Ketiadaan Tombol Hapus pada Antarmuka Studio**:
+   - Di sisi frontend (`web/src/app/studio/page.tsx`), daftar "Meme Saya" menampilkan daftar meme namun belum memiliki tombol aksi hapus, meskipun hook mutasi `useDeleteMeme` sudah tersedia di `web/src/lib/queries.ts`.
+
+---
+
+### 3. Kode yang Diubah
+
+#### A. Backend
+1. **`api/internal/modules/meme/repository.go`**:
+   - Memperbaiki `Delete` agar menyertakan validasi kepemilikan:
+     ```sql
+     DELETE FROM memes WHERE id = $1 AND user_id = $2
+     ```
+   - Memperbaiki `GetByID` agar menyertakan validasi kepemilikan dan menyamakan 9 kolom data `Meme`:
+     ```sql
+     SELECT id, user_id, title, base_url, result_url, top_text, bottom_text, font_size, created_at
+     FROM memes WHERE id = $1 AND user_id = $2
+     ```
+   - Memperbaiki `SetResultURL` agar menyertakan validasi kepemilikan:
+     ```sql
+     UPDATE memes SET result_url = $2
+     WHERE id = $1 AND user_id = $3
+     RETURNING ...
+     ```
+2. **`api/internal/modules/meme/service.go`**:
+   - Menambahkan method `Get(ctx context.Context, userID, id string) (Meme, error)` yang meneruskan query aman `GetByID` dengan pengecekan `userID`.
+3. **`api/internal/modules/meme/handler.go`**:
+   - Menambahkan handler `Get(w http.ResponseWriter, r *http.Request)` untuk merespons permintaan detail meme pengguna dengan status `200 OK` dan kode `CodeMemeFetched (30103)`.
+4. **`api/internal/modules/meme/mount.go`**:
+   - Mendaftarkan rute `GET /api/v1/memes/{id}` yang dibungkus middleware autentikasi `authMW`.
+5. **`api/internal/modules/meme/handler_test.go`**:
+   - Menambahkan unit test untuk memverifikasi proteksi autentikasi pada endpoint `Delete` dan `Get`, serta memastikan route `GET` dan `DELETE` terdaftar dan terproteksi di HTTP ServeMux.
+
+#### B. Frontend
+1. **`web/src/app/studio/page.tsx`**:
+   - Mengimpor dan menginisialisasi `useDeleteMeme()`.
+   - Menambahkan tombol "Hapus" pada setiap item kartu di daftar "Meme Saya" lengkap dengan konfirmasi dialog (`window.confirm`) dan penonaktifan tombol (`disabled={deleteMeme.isPending}`) saat proses penghapusan berlangsung.
+
+---
+
+### 4. Bukti Penyelesaian (*Proof of Completion*)
+
+#### A. Langkah Reproduksi Sebelum Perbaikan
+1. Siapkan dua akun pengguna berbeda: User A (`krisnalavendrairawan@gmail.com`) dan User B (`tester102@example.com`).
+2. Buat meme milik User A di database:
+   - Meme ID: `11111111-1111-1111-1111-111111111111`
+   - Owner (`user_id`): `6a7ed9b8-7c36-4014-a90e-358400e7ec9f` (User A)
+3. Login sebagai User B dan kirim request `DELETE /api/v1/memes/11111111-1111-1111-1111-111111111111`:
+   ```bash
+   curl -i -X DELETE http://localhost:8080/api/v1/memes/11111111-1111-1111-1111-111111111111 \
+     -H "Authorization: Bearer <token_user_b>"
+   ```
+   **Output**:
+   ```http
+   HTTP/1.1 200 OK
+   Content-Type: application/json
+
+   {"success":true,"code":30105,"message":"meme dihapus"}
+   ```
+4. Periksa database:
+   ```sql
+   SELECT * FROM memes WHERE id = '11111111-1111-1111-1111-111111111111';
+   ```
+   **Output**: `0 rows`. Meme milik User A terhapus oleh User B (Vulnerabilitas IDOR terbukti).
+
+#### B. Langkah Reproduksi Sesudah Perbaikan
+1. Jalankan unit test modul meme di backend:
+   ```bash
+   cd api && go test -v ./internal/modules/meme
+   ```
+   **Output**:
+   ```
+   === RUN   TestHandler_Delete_RequiresAuth
+   --- PASS: TestHandler_Delete_RequiresAuth (0.00s)
+   === RUN   TestHandler_Get_RequiresAuth
+   --- PASS: TestHandler_Get_RequiresAuth (0.00s)
+   === RUN   TestRegisterRoutes_IncludesGetAndOwnershipProtectedRoutes
+   --- PASS: TestRegisterRoutes_IncludesGetAndOwnershipProtectedRoutes (0.00s)
+   PASS
+   ok      github.com/nyxsr/meme-portal/api/internal/modules/meme  0.004s
+   ```
+2. Jalankan seluruh pengecekan kode otomatis:
+   ```bash
+   make check
+   ```
+   **Output**:
+   ```
+   cd api && go build -o bin/api ./cmd/server
+   cd web && bun run check
+   $ tsc --noEmit
+   ```
+3. Pengujian keamanan end-to-end (IDOR Protection Test):
+   - Siapkan Meme ID `33333333-3333-3333-3333-333333333333` milik User A (`07f8854c-66a0-49e1-a4c6-912716c55c60`).
+   - **Percobaan 1 (User B mencoba melihat meme User A)**:
+     ```bash
+     curl -i -X GET http://localhost:8080/api/v1/memes/33333333-3333-3333-3333-333333333333 \
+       -H "Authorization: Bearer <token_user_b>"
+     ```
+     **Output**:
+     ```http
+     HTTP/1.1 404 Not Found
+     {"success":false,"code":30001,"message":"meme tidak ditemukan"}
+     ```
+   - **Percobaan 2 (User B mencoba menghapus meme User A)**:
+     ```bash
+     curl -i -X DELETE http://localhost:8080/api/v1/memes/33333333-3333-3333-3333-333333333333 \
+       -H "Authorization: Bearer <token_user_b>"
+     ```
+     **Output**:
+     ```http
+     HTTP/1.1 404 Not Found
+     {"success":false,"code":30001,"message":"meme tidak ditemukan"}
+     ```
+   - Cek database: Meme tetap aman tersimpan di database (`1 row`).
+   - **Percobaan 3 (User A melihat meme miliknya sendiri)**:
+     ```bash
+     curl -i -X GET http://localhost:8080/api/v1/memes/33333333-3333-3333-3333-333333333333 \
+       -H "Authorization: Bearer <token_user_a>"
+     ```
+     **Output**:
+     ```http
+     HTTP/1.1 200 OK
+     {"success":true,"code":30103,"message":"meme ditemukan","data":{"id":"33333333-...","userId":"07f8854c-...","title":"Meme Rahasia User A",...}}
+     ```
+   - **Percobaan 4 (User A menghapus meme miliknya sendiri)**:
+     ```bash
+     curl -i -X DELETE http://localhost:8080/api/v1/memes/33333333-3333-3333-3333-333333333333 \
+       -H "Authorization: Bearer <token_user_a>"
+     ```
+     **Output**:
+     ```http
+     HTTP/1.1 200 OK
+     {"success":true,"code":30105,"message":"meme dihapus"}
+     ```
+   - Cek database: Meme berhasil terhapus secara sah oleh pemiliknya (`0 rows`).

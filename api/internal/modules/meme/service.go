@@ -94,6 +94,10 @@ func (s *Service) Complete(ctx context.Context, userID, id, resultURL string) (M
 	return s.repo.SetResultURL(ctx, id, userID, resultURL)
 }
 
+func (s *Service) Get(ctx context.Context, userID, id string) (Meme, error) {
+	return s.repo.GetByID(ctx, id, userID)
+}
+
 func (s *Service) List(ctx context.Context, userID string, limit, offset int32) (ListResponse, error) {
 	items, total, err := s.repo.ListByUser(ctx, userID, limit, offset)
 	if err != nil {

@@ -20,5 +20,6 @@ func RegisterRoutes(mux *http.ServeMux, h *Handler, authMW func(http.Handler) ht
 	mux.Handle("POST /api/v1/memes/{id}/result-upload", authMW(http.HandlerFunc(h.ResultUpload)))
 	mux.Handle("POST /api/v1/memes/{id}/complete", authMW(http.HandlerFunc(h.Complete)))
 	mux.Handle("GET /api/v1/memes", authMW(http.HandlerFunc(h.List)))
+	mux.Handle("GET /api/v1/memes/{id}", authMW(http.HandlerFunc(h.Get)))
 	mux.Handle("DELETE /api/v1/memes/{id}", authMW(http.HandlerFunc(h.Delete)))
 }

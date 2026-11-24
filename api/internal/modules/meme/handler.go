@@ -87,6 +87,20 @@ func (h *Handler) Complete(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, http.StatusOK, CodeMemeUpdated, m, "meme selesai")
 }
 
+func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.UserIDFromContext(r.Context())
+	if !ok {
+		response.Error(w, http.StatusUnauthorized, response.CodeUnauthorized, "unauthorized")
+		return
+	}
+	m, err := h.service.Get(r.Context(), userID, r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	response.Success(w, http.StatusOK, CodeMemeFetched, m, "meme ditemukan")
+}
+
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	userID, ok := middleware.UserIDFromContext(r.Context())
 	if !ok {
