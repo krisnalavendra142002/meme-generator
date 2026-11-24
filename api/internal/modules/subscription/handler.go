@@ -28,6 +28,8 @@ func (h *Handler) ListPlans(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
 	userID, ok := middleware.UserIDFromContext(r.Context())
 	if !ok {
 		response.Error(w, http.StatusUnauthorized, response.CodeUnauthorized, "unauthorized")

@@ -195,3 +195,105 @@ Setelah ditelusuri dari alur checkout di frontend dan backend:
      `payment.reference: 18751c2fe44fcab19fe48487`
 4. Uji Concurrency (5 request paralel sekaligus):
    - Seluruh 5 request mengembalikan HTTP 201 dengan ID langganan dan payment yang identik tanpa ada error 500.
+
+---
+
+## TKT-102: Status Langganan Aneh, Kadang Muncul Kadang Engga (Public HTTP Cache Leak)
+
+### 1. Deskripsi Keluhan
+Pengguna melaporkan:
+> “Aku sudah bayar dan konfirmasi pembayarannya sukses, tapi halaman Paket masih tulis belum berlangganan. Aku tutup tab terus buka lagi, masih sama. Yang bikin takut, teman sekantor pakai WiFi kantor dan di layarnya malah muncul status dan kuota milikku, padahal dia belum login.”
+
+### 2. Investigasi & Akar Masalah (*Root Cause*)
+Setelah ditelusuri dari alur endpoint status langganan (`GET /api/v1/subscription/status`):
+
+1. **Header `Cache-Control` Publik pada Endpoint Privat Berautentikasi (`api/internal/modules/subscription/mount.go`)**:
+   - Endpoint `GET /api/v1/subscription/status` mengembalikan data spesifik dan privat milik user yang sedang login (status langganan, nama paket, sisa kuota, dan masa berlaku).
+   - Namun di `mount.go`, handler rute tersebut dibungkus dengan pemberian header HTTP cache publik:
+     ```go
+     w.Header().Set("Cache-Control", "public, max-age=86400")
+     ```
+   - Direktif `public` mengizinkan seluruh perantara jaringan (*shared caching proxy*, seperti gateway/proxy WiFi kantor, reverse proxy, atau CDN) untuk menyimpan respons tersebut dan menyajikannya kepada pengguna lain.
+   - Durasi `max-age=86400` memerintahkan browser dan proxy untuk menyimpan respons hingga 24 jam tanpa perlu memvalidasi ulang ke server asal (*origin server*).
+
+2. **Dampak Masalah**:
+   - **Status Tidak Berubah Setelah Bayar**: Saat pengguna membuka aplikasi sebelum membayar, browser meng-cache respons `{"subscribed": false}` selama 24 jam. Setelah membayar lunas, ketika pengguna menutup dan membuka tab kembali, browser menyajikan data lama dari *disk cache* alih-alih menghubungi backend.
+   - **Kebocoran Data ke Teman Sekantor**: Ketika berada dalam satu jaringan WiFi kantor yang memiliki caching proxy transparan, respons berstatus aktif milik pengguna yang sudah bayar disimpan oleh proxy. Pengguna lain (meskipun belum login) yang membuka halaman web menerima respons cache tersebut, sehingga status dan kuota akun milik pengguna pertama bocor ke layar pengguna lain.
+
+---
+
+### 3. Kode yang Diubah
+
+#### A. Backend
+1. **`api/internal/modules/subscription/handler.go`**:
+   - Menambahkan header `Cache-Control: no-store, no-cache, must-revalidate` dan `Pragma: no-cache` pada fungsi `Status` agar seluruh respons status privat tidak disimpan di cache browser maupun shared proxy.
+2. **`api/internal/modules/subscription/mount.go`**:
+   - Menghapus wrapper anonymous function yang memasang `Cache-Control: public, max-age=86400`. Rute `GET /api/v1/subscription/status` kini langsung diteruskan ke handler `h.Status`.
+3. **`api/internal/modules/subscription/handler_test.go`**:
+   - Menambahkan unit test `TestHandler_Status_SetsNoStoreHeaders` untuk memastikan handler `Status` selalu menyetel header `no-store`.
+   - Menambahkan unit test `TestRegisterRoutes_Status_DoesNotHavePublicCache` untuk memastikan route registrasi tidak lagi menyisipkan header `public, max-age=86400`.
+
+---
+
+### 4. Bukti Penyelesaian (*Proof of Completion*)
+
+#### A. Langkah Reproduksi Sebelum Perbaikan
+1. Kirim request berautentikasi ke endpoint `GET /api/v1/subscription/status`:
+   ```bash
+   curl -i http://localhost:8080/api/v1/subscription/status \
+     -H "Authorization: Bearer <token>"
+   ```
+   **Output**:
+   ```http
+   HTTP/1.1 200 OK
+   Cache-Control: public, max-age=86400
+   Content-Type: application/json
+   Date: Tue, 24 Nov 2026 03:35:37 GMT
+   Content-Length: 114
+
+   {"success":true,"code":20104,"message":"status langganan","data":{"subscribed":false,"memesUsed":0,"maxMemes":0}}
+   ```
+2. Header `Cache-Control: public, max-age=86400` menyebabkan browser dan shared proxy kantor menyimpan data ini selama 24 jam dan membagikannya ke klien lain di jaringan yang sama.
+
+#### B. Langkah Reproduksi Sesudah Perbaikan
+1. Jalankan unit test modul subscription:
+   ```bash
+   cd api && go test -v ./internal/modules/subscription
+   ```
+   **Output**:
+   ```
+   === RUN   TestHandler_Checkout_RequiresIdempotencyKey
+   --- PASS: TestHandler_Checkout_RequiresIdempotencyKey (0.00s)
+   === RUN   TestHandler_Status_SetsNoStoreHeaders
+   --- PASS: TestHandler_Status_SetsNoStoreHeaders (0.00s)
+   === RUN   TestRegisterRoutes_Status_DoesNotHavePublicCache
+   --- PASS: TestRegisterRoutes_Status_DoesNotHavePublicCache (0.00s)
+   PASS
+   ok      github.com/nyxsr/meme-portal/api/internal/modules/subscription  0.003s
+   ```
+2. Kirim request berautentikasi ke `GET /api/v1/subscription/status`:
+   ```bash
+   curl -i http://localhost:8080/api/v1/subscription/status \
+     -H "Authorization: Bearer <token>"
+   ```
+   **Output**:
+   ```http
+   HTTP/1.1 200 OK
+   Cache-Control: no-store, no-cache, must-revalidate
+   Content-Type: application/json
+   Pragma: no-cache
+
+   {"success":true,"code":20104,"message":"status langganan","data":{"subscribed":true,"status":"active",...}}
+   ```
+3. Kirim request tanpa token autentikasi (seperti teman sekantor yang belum login):
+   ```bash
+   curl -i http://localhost:8080/api/v1/subscription/status
+   ```
+   **Output**:
+   ```http
+   HTTP/1.1 401 Unauthorized
+   Content-Type: application/json
+
+   {"success":false,"code":10002,"message":"unauthorized"}
+   ```
+   *Shared proxy tidak dapat menyajikan respons cache milik pengguna terautentikasi ke pengguna yang belum login, dan browser selalu menerima status terkini dari server.*
