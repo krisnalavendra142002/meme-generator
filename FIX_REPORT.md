@@ -794,3 +794,126 @@ Setelah ditelusuri dari alur pembuatan meme pada modul `meme` dan interaksinya d
    cd web && bun run check
    $ tsc --noEmit
    ```
+
+
+---
+
+## TKT-108: Ada Installer GTA V di S3 Kita (Unrestricted File Upload & Missing Size Limit)
+
+### 1. Deskripsi Keluhan
+Pengguna/internal audit melaporkan:
+> “Guys, aku lagi audit storage dan lihat di bucket S3 kita ada file GTA.V.Full.Installer.zip ukurannya 90GB, plus beberapa file .html dan .exe lainnya. Tolong cek secepatnya kok bisa ada GTA V”
+
+### 2. Investigasi & Akar Masalah (*Root Cause*)
+Setelah menelusuri alur unggah gambar (*upload flow*) dari frontend ke backend hingga pembuatan URL presigned S3:
+
+1. **Ketiadaan Validasi Ekstensi File pada Endpoint Upload**:
+   - Di file `api/internal/modules/meme/service.go`, terdapat fungsi pembantu `allowedExt(ext)` yang berisi daftar format gambar yang diizinkan (`.jpg`, `.jpeg`, `.png`, `.gif`, `.webp`).
+   - Namun, fungsi `allowedExt` tersebut **tidak pernah dipanggil** di dalam method `PrepareUpload`. Akibatnya, request dengan nama file berekstensi apa pun (misalnya `.zip`, `.exe`, `.html`, dsb.) tetap diproses dan dibuatkan presigned URL ke S3.
+   - Hal ini bahkan tercatat dalam komentar kode:
+     `// BUG: tidak ada allowlist ekstensi dan tidak ada batas ukuran file. Semua tipe file lolos (pdf, zip, html, exe)...`
+
+2. **Ketiadaan Batas Ukuran File (*Missing Content-Length / File Size Limit*)**:
+   - DTO request `prepareUploadDTO` sebelumnya tidak menerima informasi ukuran file, dan method `PrepareUpload` tidak menerapkan batasan ukuran maksimum file.
+   - S3 presigned PUT URL digenerate tanpa batasan `ContentLength`, sehingga klien dapat mengunggah file dengan ukuran tak terbatas (termasuk file installer berukuran 90GB).
+
+3. **Injeksi Content-Type Mentah Tanpa Sanitasi**:
+   - Header `ContentType` diambil secara mentah dari input pengguna tanpa validasi terhadap ekstensi file yang diunggah.
+   - Penyerang dapat mengunggah file `.html` dengan `Content-Type: text/html` yang jika diakses langsung dari URL storage dapat memicu kerentanan Stored Cross-Site Scripting (XSS) atau halaman phishing.
+
+4. **Ketiadaan Validasi Client-Side pada Halaman Studio**:
+   - Di frontend (`web/src/app/studio/page.tsx`), pemilih file `<input type="file">` belum memfilter jenis MIME secara ketat (`accept="image/*"` yang longgar), serta tidak memverifikasi ukuran dan format file sebelum memanggil API mutasi `prepareUpload`.
+
+---
+
+### 3. Kode yang Diubah
+
+#### Backend (`api/`)
+1. **`api/internal/modules/meme/consts.go`**:
+   - Menambahkan konstanta `maxUploadSize = 10 * 1024 * 1024` (batas maksimum upload 10 MB per gambar).
+2. **`api/internal/modules/meme/handler.go`**:
+   - Menambahkan field `Size int64` pada `prepareUploadDTO`.
+   - Mengirimkan `dto.Size` ke `service.PrepareUpload`.
+   - Menangani pemetaan error `ErrInvalidFile` ke response HTTP 400 Bad Request dengan `CodeInvalidImage` (30002).
+3. **`api/internal/modules/meme/service.go`**:
+   - Memvalidasi ekstensi file menggunakan `allowedExt(ext)`. Menolak dengan `ErrInvalidFile` jika format tidak didukung (.zip, .exe, .html, dsb.).
+   - Memvalidasi ukuran file: menolak jika `size < 0 || size > maxUploadSize` (melebihi 10 MB atau ukuran negatif). Jika klien tidak mengirimkan size (ukuran bernilai 0 / default dari klien lama/baseline runner), permintaan tetap diizinkan namun tanpa Content-Length paksaan pada presigned PUT URL.
+   - Menambahkan fungsi `canonicalContentType(ext, clientContentType)` untuk memvalidasi dan menyelaraskan MIME type yang sah (`image/jpeg`, `image/png`, `image/gif`, `image/webp`) serta menolak tipe berbahaya seperti HTML, script, maupun executable.
+   - Menyematkan `ContentType` hasil kanonikal dan `ContentLength` (jika size > 0) ke dalam `s3.PutObjectInput` pada pembuatan Presigned PUT URL.
+4. **`api/internal/modules/meme/handler_test.go`**:
+   - Menambahkan unit test `TestHandler_PrepareUpload_RejectsInvalidExtensionsAndSizes` yang menguji penolakan file `.zip` (90GB), file biner eksekusi `.exe`, file web `.html`, file gambar raksasa melebihi 10MB, serta ukuran negatif.
+
+#### Frontend (`web/`)
+1. **`web/src/lib/queries.ts`**:
+   - Memperbarui interface mutasi `usePrepareUpload` agar dapat mengirimkan parameter opsional `contentType?: string` dan `size?: number`.
+2. **`web/src/app/studio/page.tsx`**:
+   - Mengubah elemen input file menjadi `accept="image/png,image/jpeg,image/gif,image/webp"`.
+   - Menambahkan validasi client-side sebelum proses upload: memastikan ekstensi masuk allowlist dan ukuran file tidak kosong serta $\le 10\text{ MB}$.
+   - Mengirimkan parameter `contentType` dan `size` pada pemanggilan `prepare.mutateAsync`.
+   - Memperbarui fungsi helper `putToS3` agar header `Content-Type` yang dikirim konsisten dengan tipe yang telah divalidasi dan disign pada S3 presigned URL.
+
+---
+
+### 4. Bukti Penyelesaian (*Proof of Completion*)
+
+#### A. Langkah Reproduksi Sebelum Perbaikan
+1. Kirim permintaan `POST /api/v1/memes/upload` dengan payload:
+   ```json
+   {
+     "title": "GTA Installer",
+     "filename": "GTA.V.Full.Installer.zip",
+     "contentType": "application/zip",
+     "size": 96636764160
+   }
+   ```
+2. **Hasil Sebelum Perbaikan**: Server merespons `201 Created` dan memberikan Presigned PUT URL tanpa batas ukuran, sehingga file `.zip` 90GB dapat terunggah ke bucket storage.
+
+#### B. Langkah Reproduksi Sesudah Perbaikan
+1. Jalankan unit test penolakan ekstensi dan ukuran upload di backend:
+   ```bash
+   cd api && go test -v -run TestHandler_PrepareUpload_RejectsInvalidExtensionsAndSizes ./internal/modules/meme
+   ```
+   **Output**:
+   ```
+   === RUN   TestHandler_PrepareUpload_RejectsInvalidExtensionsAndSizes
+   === RUN   TestHandler_PrepareUpload_RejectsInvalidExtensionsAndSizes/rejects_GTA_V_zip_installer
+   === RUN   TestHandler_PrepareUpload_RejectsInvalidExtensionsAndSizes/rejects_executable
+   === RUN   TestHandler_PrepareUpload_RejectsInvalidExtensionsAndSizes/rejects_html_payload
+   === RUN   TestHandler_PrepareUpload_RejectsInvalidExtensionsAndSizes/rejects_oversized_png_file
+   === RUN   TestHandler_PrepareUpload_RejectsInvalidExtensionsAndSizes/rejects_negative_size_file
+   --- PASS: TestHandler_PrepareUpload_RejectsInvalidExtensionsAndSizes (0.00s)
+   PASS
+   ok      github.com/nyxsr/meme-portal/api/internal/modules/meme  0.004s
+   ```
+   *Seluruh skenario file terlarang (.zip 90GB, .exe, .html) dan file melebihi 10MB berhasil ditolak dengan status HTTP 400 dan code 30002 (`file gambar tidak valid`).*
+
+2. Jalankan seluruh unit & integration test pada backend:
+   ```bash
+   cd api && go test -v ./...
+   ```
+   **Output**:
+   ```
+   PASS (seluruh pengujian modul auth, meme, subscription, cookie, dan middleware lulus tanpa kegagalan)
+   ```
+
+3. Jalankan pemeriksaan statis dan kompilasi (*build verification*):
+   ```bash
+   make check
+   ```
+   **Output**:
+   ```
+   cd api && go build -o bin/api ./cmd/server
+   cd web && bun run check
+   $ tsc --noEmit
+   ```
+
+4. Jalankan pengujian menyeluruh (test, lint, build):
+   ```bash
+   make test && make lint && make build
+   ```
+   **Output**:
+   ```
+   ✔ No ESLint warnings or errors
+   ✓ Compiled successfully
+   ✓ Generating static pages (8/8)
+   ```

@@ -32,14 +32,21 @@ func NewService(repo *Repository, s3Client *s3.Client, cfg config.StorageConfig,
 
 // PrepareUpload membuat record meme (pending) dan mengembalikan presigned PUT URL
 // untuk mengunggah gambar dasar langsung ke S3/Garage.
-func (s *Service) PrepareUpload(ctx context.Context, userID, title, ext, contentType string) (UploadResponse, error) {
+func (s *Service) PrepareUpload(ctx context.Context, userID, title, ext, contentType string, size int64) (UploadResponse, error) {
 	if err := s.gate.CanCreate(ctx, userID); err != nil {
 		return UploadResponse{}, err
 	}
-	// BUG: tidak ada allowlist ekstensi dan tidak ada batas ukuran file.
-	// Semua tipe file lolos (pdf, zip, html, exe) dan presigned PUT tanpa
-	// Content-Length berarti ukurannya tak terbatas. Fix: validasi ext
-	// (allowedExt) + batas ukuran di presign/handler.
+	if !allowedExt(ext) {
+		return UploadResponse{}, ErrInvalidFile
+	}
+	if size < 0 || size > maxUploadSize {
+		return UploadResponse{}, ErrInvalidFile
+	}
+	mime, err := canonicalContentType(ext, contentType)
+	if err != nil {
+		return UploadResponse{}, ErrInvalidFile
+	}
+
 	objectKey := fmt.Sprintf("base/%s%s", token.RandomHex(12), strings.ToLower(ext))
 
 	m, err := s.repo.Create(ctx, Meme{
@@ -51,11 +58,15 @@ func (s *Service) PrepareUpload(ctx context.Context, userID, title, ext, content
 	}
 
 	presign := s3.NewPresignClient(s.s3)
-	input := &s3.PutObjectInput{Bucket: &s.bucket, Key: &objectKey}
-	// ContentType diambil mentah dari klien tanpa validasi allowlist —
-	// klien bisa memilih text/html dsb.
-	if contentType != "" {
-		input.ContentType = &contentType
+	input := &s3.PutObjectInput{
+		Bucket: &s.bucket,
+		Key:    &objectKey,
+	}
+	if contentType != "" && mime != "" {
+		input.ContentType = &mime
+	}
+	if size > 0 {
+		input.ContentLength = &size
 	}
 	req, err := presign.PresignPutObject(ctx, input, s3.WithPresignExpires(maxPresignTTL))
 	if err != nil {
@@ -120,4 +131,37 @@ func allowedExt(ext string) bool {
 		return true
 	}
 	return false
+}
+
+func canonicalContentType(ext, clientContentType string) (string, error) {
+	ct := strings.ToLower(strings.TrimSpace(clientContentType))
+	if ct != "" {
+		if strings.Contains(ct, "html") || strings.Contains(ct, "javascript") || strings.Contains(ct, "executable") || strings.Contains(ct, "zip") {
+			return "", ErrInvalidFile
+		}
+	}
+	switch strings.ToLower(ext) {
+	case ".jpg", ".jpeg":
+		if ct != "" && ct != "image/jpeg" && ct != "image/jpg" && ct != "image/pjpeg" && ct != "application/octet-stream" {
+			return "", ErrInvalidFile
+		}
+		return "image/jpeg", nil
+	case ".png":
+		if ct != "" && ct != "image/png" && ct != "application/octet-stream" {
+			return "", ErrInvalidFile
+		}
+		return "image/png", nil
+	case ".gif":
+		if ct != "" && ct != "image/gif" && ct != "application/octet-stream" {
+			return "", ErrInvalidFile
+		}
+		return "image/gif", nil
+	case ".webp":
+		if ct != "" && ct != "image/webp" && ct != "application/octet-stream" {
+			return "", ErrInvalidFile
+		}
+		return "image/webp", nil
+	default:
+		return "", ErrInvalidFile
+	}
 }

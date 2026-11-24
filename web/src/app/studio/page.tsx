@@ -102,11 +102,16 @@ function drawMeme(
   }
 }
 
-async function putToS3(uploadUrl: string, blob: Blob) {
+async function putToS3(uploadUrl: string, blob: Blob, contentType?: string) {
+  const type = contentType || blob.type;
+  const headers: Record<string, string> = {};
+  if (type) {
+    headers["Content-Type"] = type;
+  }
   const res = await fetch(uploadUrl, {
     method: "PUT",
     body: blob,
-    headers: { "Content-Type": blob.type },
+    headers,
   });
   if (!res.ok) throw new Error(`upload ke S3 gagal: ${res.status}`);
 }
@@ -166,10 +171,36 @@ export default function StudioPage() {
       });
       imgRef.current = img;
 
+      // Validasi ekstensi dan batas ukuran file di client-side (maksimal 10MB)
+      const allowedExtensions = [".jpg", ".jpeg", ".png", ".gif", ".webp"];
+      const ext = file.name.substring(file.name.lastIndexOf(".")).toLowerCase();
+      if (!allowedExtensions.includes(ext)) {
+        setError("Format file tidak didukung. Harap pilih gambar JPG, PNG, GIF, atau WebP.");
+        return;
+      }
+      if (file.size <= 0 || file.size > 10 * 1024 * 1024) {
+        setError("Ukuran gambar tidak valid atau melebihi batas maksimal (10MB).");
+        return;
+      }
+
+      const extMimeMap: Record<string, string> = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+      };
+      const contentType = file.type || extMimeMap[ext] || "image/jpeg";
+
       // 1) presign gambar dasar
-      const prepared = await prepare.mutateAsync({ title, filename: file.name });
+      const prepared = await prepare.mutateAsync({
+        title,
+        filename: file.name,
+        contentType,
+        size: file.size,
+      });
       // 2) unggah gambar dasar ke Garage
-      await putToS3(prepared.uploadUrl, file);
+      await putToS3(prepared.uploadUrl, file, contentType);
 
       // 3) render hasil ke PNG
       const resultCanvas = document.createElement("canvas");
@@ -185,7 +216,7 @@ export default function StudioPage() {
       const result = unwrap<ResultUploadData>(
         await api.post(`/api/v1/memes/${prepared.id}/result-upload`),
       );
-      await putToS3(result.uploadUrl, blob);
+      await putToS3(result.uploadUrl, blob, "image/png");
 
       // 5) complete
       await complete.mutateAsync({ id: prepared.id, resultUrl: result.baseUrl });
@@ -290,7 +321,7 @@ export default function StudioPage() {
               <Input
                 id="image"
                 type="file"
-                accept="image/*"
+                accept="image/png,image/jpeg,image/gif,image/webp"
                 ref={fileRef}
                 onChange={() => {
                   const file = fileRef.current?.files?.[0];
