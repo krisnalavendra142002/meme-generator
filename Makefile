@@ -1,5 +1,6 @@
 SHELL := /bin/sh
 OS := $(shell uname -s 2>/dev/null || echo unknown)
+export PATH := $(HOME)/.bun/bin:$(PATH)
 
 -include .env
 export
@@ -157,7 +158,7 @@ sqlc-generate: ensure-sqlc
 	cd api && PATH="$$PATH:$$(go env GOPATH)/bin" sqlc generate
 
 build:
-	cd api && go build -o bin/api ./...
+	cd api && go build -o bin/api ./cmd/server
 	cd web && bun run build
 
 lint:

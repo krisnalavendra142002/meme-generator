@@ -55,9 +55,17 @@ export function useLogin() {
 export function useLogout() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async () => api.post("/api/v1/auth/logout"),
-    onSuccess: () => {
+    mutationFn: async () => {
+      try {
+        await api.post("/api/v1/auth/logout");
+      } catch {
+        console.log('error');
+      }
+    },
+    onSettled: () => {
       qc.clear();
+      document.cookie = "meme_access_token=; path=/; max-age=0";
+      document.cookie = "meme_refresh_token=; path=/; max-age=0";
       window.location.href = "/";
     },
   });

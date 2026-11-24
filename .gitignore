@@ -14,3 +14,11 @@ api/.gopath/
 web/node_modules/
 web/.next/
 web/out/
+*.tsbuildinfo
+
+# AI / Project docs
+AGENTS.md
+agents.md
+PROJECT_OVERVIEW.md
+project_overview.md
+
