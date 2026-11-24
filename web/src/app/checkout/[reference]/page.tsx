@@ -16,14 +16,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { useConfirmPayment } from "@/lib/queries";
-
-function formatIdr(n: number) {
-  return new Intl.NumberFormat("id-ID", {
-    style: "currency",
-    currency: "IDR",
-    maximumFractionDigits: 0,
-  }).format(n);
-}
+import { describeError } from "@/lib/errors";
 
 export default function CheckoutPage() {
   const { reference } = useParams<{ reference: string }>();
@@ -35,7 +28,7 @@ export default function CheckoutPage() {
       await confirm.mutateAsync(reference);
       setTimeout(() => router.push("/pricing"), 1200);
     } catch {
-      // BUG: error sengaja ditelan — gagal bayar tidak menampilkan apa-apa.
+      // Error ditangani dan ditampilkan melalui confirm.isError & describeError
     }
   };
 
@@ -58,12 +51,25 @@ export default function CheckoutPage() {
               ✅ Pembayaran berhasil! Langganan Anda aktif. Mengalihkan…
             </p>
           ) : null}
+          {confirm.isError ? (
+            <p className="text-center text-sm font-medium text-destructive">
+              {describeError(confirm.error)}
+            </p>
+          ) : null}
         </CardContent>
         <CardFooter className="flex gap-2">
-          <Button className="flex-1" onClick={onPay}>
-            {confirm.data ? "Lunas" : "Bayar Sekarang (Simulasi)"}
+          <Button
+            className="flex-1"
+            onClick={onPay}
+            disabled={confirm.isPending || !!confirm.data}
+          >
+            {confirm.isPending
+              ? "Memproses Pembayaran..."
+              : confirm.data
+              ? "Lunas"
+              : "Bayar Sekarang (Simulasi)"}
           </Button>
-          <Button asChild variant="ghost">
+          <Button asChild variant="ghost" disabled={confirm.isPending}>
             <Link href="/pricing">Batal</Link>
           </Button>
         </CardFooter>

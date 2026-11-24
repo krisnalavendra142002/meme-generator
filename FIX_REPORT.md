@@ -625,3 +625,86 @@ Setelah ditelusuri alur otorisasi pembuatan meme (`PrepareUpload`, `ResultUpload
 4. Uji simulasi query database:
    - Query `ActiveByUser` baru dengan filter `AND s.ends_at > now()` mengembalikan `0 rows` (`pgx.ErrNoRows` $\rightarrow$ `ErrNotSubscribed`).
    - Endpoint upload `/api/v1/memes/upload` langsung mengembalikan `HTTP 403 Forbidden` (`{"success":false,"code":30002,"message":"anda belum berlangganan paket aktif"}`).
+
+
+---
+
+## TKT-106: Klik Bayar Tidak Terjadi Apa-Apa (Error Swallowing & State Loading Pembayaran)
+
+### 1. Deskripsi Keluhan
+Pengguna melaporkan:
+> “Aku coba bayar di halaman paket, klik Bayar Sekarang. Tombolnya tidak berubah, tidak ada pesan sukses, tidak ada pesan gagal. Aku klik lima kali juga diam saja. Email juga gak ada struk. Apakah pembayaranku masuk atau tidak?”
+
+### 2. Investigasi & Akar Masalah (*Root Cause*)
+Setelah ditelusuri pada halaman simulasi pembayaran (`web/src/app/checkout/[reference]/page.tsx`):
+
+1. **Error Sengaja Ditelan (*Swallowed Error*)**:
+   - Fungsi `onPay` membungkus panggilan konfirmasi pembayaran dalam blok `try ... catch` kosong:
+     ```tsx
+     const onPay = async () => {
+       try {
+         await confirm.mutateAsync(reference);
+         setTimeout(() => router.push("/pricing"), 1200);
+       } catch {
+         // BUG: error sengaja ditelan — gagal bayar tidak menampilkan apa-apa.
+       }
+     };
+     ```
+   - Jika pembayaran gagal (misalnya karena referensi pembayaran tidak valid, koneksi bermasalah, atau pembayaran sudah lunas sehingga backend mengembalikan status HTTP 402 `ErrPaymentFailed`), blok `catch` menelan error tersebut tanpa mengubah state UI dan tanpa menampilkan pesan gagal apa pun.
+
+2. **Ketiadaan Indikator Loading & Proteksi Multi-Click pada Tombol**:
+   - Komponen tombol `Bayar Sekarang (Simulasi)` tidak memiliki atribut `disabled` saat mutasi sedang berlangsung (`confirm.isPending`) maupun saat pembayaran sudah sukses (`confirm.data`).
+   - Teks tombol tidak berubah menjadi status loading/memproses saat diklik.
+   - Akibatnya, saat koneksi lambat atau proses berlangsung, pengguna mengira tombol tidak merespons lalu mengkliknya berkali-kali ("klik lima kali juga diam saja").
+
+3. **Status HTTP 402 Belum Dipetakan di `describeError` (`web/src/lib/errors.ts`)**:
+   - Backend mengembalikan status HTTP 402 `StatusPaymentRequired` ketika pembayaran gagal atau sudah lunas, namun kamus status di `describeError` belum memetakan kode 402 secara spesifik.
+
+---
+
+### 3. Kode yang Diubah
+
+#### Frontend (`web/`)
+1. **`web/src/app/checkout/[reference]/page.tsx`**:
+   - Mengimpor `describeError` dari `@/lib/errors`.
+   - Menambahkan rendering umpan balik error (`confirm.isError`) yang menampilkan pesan kesalahan secara jelas kepada pengguna jika transaksi gagal.
+   - Menambahkan atribut `disabled={confirm.isPending || !!confirm.data}` pada tombol utama dan `disabled={confirm.isPending}` pada tombol batal agar pengguna tidak dapat melakukan spam klik.
+   - Memperbarui teks tombol secara reaktif: menampilkan `"Memproses Pembayaran..."` saat loading, `"Lunas"` saat berhasil, dan `"Bayar Sekarang (Simulasi)"` saat siap dibayar.
+   - Menghapus fungsi mati `formatIdr` yang tidak terpakai sehingga menghilangkan peringatan ESLint.
+2. **`web/src/lib/errors.ts`**:
+   - Menambahkan entri status HTTP 402 (`"Pembayaran bermasalah"`) pada kamus label error untuk memformat respons penolakan dari payment gateway/backend secara informatif.
+
+---
+
+### 4. Bukti Penyelesaian (*Proof of Completion*)
+
+#### A. Langkah Reproduksi Sebelum Perbaikan
+1. Buka halaman checkout dengan referensi acak/salah atau referensi yang sudah dibayar: `http://localhost:3000/checkout/invalid-ref-123`.
+2. Klik tombol "Bayar Sekarang (Simulasi)".
+3. Tombol tetap bertuliskan "Bayar Sekarang (Simulasi)", tidak berubah menjadi disabled, dan tidak ada pesan error yang muncul di layar meskipun backend mengembalikan HTTP 402 / 400.
+4. Klik tombol berkali-kali: UI tetap membisu tanpa ada feedback.
+
+#### B. Langkah Reproduksi Sesudah Perbaikan
+1. Jalankan linting dan build frontend:
+   ```bash
+   cd web && bun run lint && bun run build
+   ```
+   **Output**:
+   ```
+   ✔ No ESLint warnings or errors
+   ✓ Compiled successfully
+   ✓ Generating static pages (8/8)
+   ```
+2. Jalankan pemeriksaan proyek:
+   ```bash
+   make check
+   ```
+   **Output**:
+   ```
+   cd api && go build -o bin/api ./cmd/server
+   cd web && bun run check
+   $ tsc --noEmit
+   ```
+3. Pengujian antarmuka pada browser:
+   - **Skenario Berhasil**: Beli paket baru $\rightarrow$ klik "Bayar Sekarang (Simulasi)" $\rightarrow$ tombol seketika menampilkan status `"Memproses Pembayaran..."` dalam kondisi disabled $\rightarrow$ muncul banner hijau `"✅ Pembayaran berhasil! Langganan Anda aktif. Mengalihkan…"` $\rightarrow$ tombol berubah menjadi `"Lunas"` $\rightarrow$ dialihkan ke `/pricing`.
+   - **Skenario Gagal/Invalid**: Buka checkout dengan referensi tidak valid (`/checkout/invalid-123`) $\rightarrow$ klik tombol $\rightarrow$ tombol menampilkan loading lalu kembali aktif disertai pesan error merah: `"Pembayaran bermasalah: pembayaran gagal atau tidak valid"` (atau HTTP 400 sesuai respons backend). Pengguna langsung mengetahui status pembayarannya.
