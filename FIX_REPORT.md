@@ -460,3 +460,81 @@ Setelah ditelusuri alur pengelolaan meme dari database, repository, service, han
      {"success":true,"code":30105,"message":"meme dihapus"}
      ```
    - Cek database: Meme berhasil terhapus secara sah oleh pemiliknya (`0 rows`).
+
+
+---
+
+## TKT-104: Sudah Bayar tapi Navbar Bilang Belum Langganan sampai Refresh (Stale Cache & Sinkronisasi Kuota)
+
+### 1. Deskripsi Keluhan
+Pengguna melaporkan:
+> “Aku beli paket tadi dan pembayarannya sukses. Tapi nama paket di pojok kanan atas tetap kosong dan kuota di halaman Paket macet di angka lama. Setelah aku hard refresh pakai Ctrl Shift R barulah muncul. Tiap kali begitu bikin bete.”
+
+### 2. Investigasi & Akar Masalah (*Root Cause*)
+Setelah ditelusuri dari interaksi komponen antarmuka (*client-side*) dan manajemen state query di frontend (`web/`):
+
+1. **Nama Paket Tidak Dirender pada Header Akun (`web/src/components/site-header.tsx`)**:
+   - Di navbar pojok kanan atas, tombol akun pengguna hanya merender string `{user.name || user.email}`.
+   - Nama paket langganan aktif (`planName`) disembunyikan di dalam popover `HoverCard` dan tidak ditampilkan langsung di tombol navbar. Pengguna yang berhasil berlangganan mengira sistem belum mencatat statusnya karena nama paket di pojok kanan atas tampak kosong.
+
+2. **Inisialisasi Cache Tak Hingga pada Status Langganan (`web/src/lib/queries.ts`)**:
+   - Hook `useSubscriptionStatus()` disetel dengan `staleTime: Number.POSITIVE_INFINITY`.
+   - Hal ini membuat TanStack Query menganggap data status langganan abadi dan tidak pernah melakukan *background refetch* secara otomatis meskipun tab/halaman dibuka kembali (*window focus*).
+
+3. **Ketiadaan Query Invalidation saat Kuota Berubah (`web/src/lib/queries.ts`)**:
+   - Saat pengguna membuat/menyelesaikan meme (`useCompleteMeme`) atau menghapus meme (`useDeleteMeme`), mutasi hanya meng-invalidate cache `["memes"]`.
+   - Query `["subscription"]` tidak di-invalidate. Akibatnya, angka penggunaan kuota (`memesUsed`) pada halaman `/pricing` tetap macet di angka lama dan tidak berkurang/bertambah saat pengguna berpindah halaman dari Studio kembali ke Paket. Pengguna terpaksa melakukan hard refresh (`Ctrl + Shift + R`) agar seluruh state di-reset.
+
+4. **Ketiadaan Sinkronisasi Cache saat Login & Register (`web/src/lib/auth.ts`)**:
+   - Mutasi `useLogin` dan `useRegister` hanya meng-invalidate query `["me"]`, sehingga jika sesi berubah, cache `["subscription"]` berisiko tetap menyajikan state lama.
+
+---
+
+### 3. Kode yang Diubah
+
+#### Frontend (`web/`)
+1. **`web/src/components/site-header.tsx`**:
+   - Menambahkan badge nama paket di samping nama/email pengguna pada tombol akun navbar jika pengguna memiliki langganan aktif (`sub.data?.subscribed && sub.data.planName`).
+2. **`web/src/lib/queries.ts`**:
+   - Mengubah `staleTime` pada `useSubscriptionStatus` dari `Number.POSITIVE_INFINITY` menjadi 30 detik (`1000 * 30`) serta mengaktifkan `refetchOnWindowFocus: true`.
+   - Menambahkan `qc.invalidateQueries({ queryKey: queryKeys.subscription })` pada callback `onSuccess` di mutasi `useCompleteMeme` dan `useDeleteMeme` agar sisa kuota meme selalu ter-update secara otomatis setelah pembuatan atau penghapusan meme.
+3. **`web/src/lib/auth.ts`**:
+   - Menambahkan `qc.invalidateQueries({ queryKey: ["subscription"] })` pada mutasi `useRegister` dan `useLogin` untuk memastikan status langganan segar segera setelah user masuk.
+
+---
+
+### 4. Bukti Penyelesaian (*Proof of Completion*)
+
+#### A. Langkah Reproduksi Sebelum Perbaikan
+1. Login dan beli paket langganan di `/pricing`.
+2. Setelah pembayaran sukses dan dialihkan kembali ke aplikasi, perhatikan pojok kanan atas navbar: tombol akun hanya menampilkan nama pengguna tanpa ada badge/nama paket.
+3. Buka halaman `/studio`, upload gambar dan render 1 meme hingga selesai.
+4. Buka kembali halaman `/pricing`: angka kuota meme tetap `0 / 20` (tidak berubah), kuota macet di angka lama.
+5. Lakukan hard refresh (`Ctrl + Shift + R`), barulah kuota ter-update menjadi `1 / 20`.
+
+#### B. Langkah Reproduksi Sesudah Perbaikan
+1. Verifikasi kompilasi frontend dan typecheck:
+   ```bash
+   cd web && bun run check && bun run build
+   ```
+   **Output**:
+   ```
+   $ tsc --noEmit
+   ✓ Compiled successfully
+   ✓ Generating static pages (8/8)
+   ```
+2. Jalankan seluruh pengujian kode otomatis:
+   ```bash
+   make check
+   ```
+   **Output**:
+   ```
+   cd api && go build -o bin/api ./cmd/server
+   cd web && bun run check
+   $ tsc --noEmit
+   ```
+3. Uji perilaku antarmuka pada browser:
+   - Login dengan user aktif $\rightarrow$ Pojok kanan atas navbar menampilkan nama user beserta badge paket aktif secara langsung (mis. `[user] [Premium 1 Hari]`).
+   - Masuk ke `/studio`, buat 1 meme baru hingga berhasil tersimpan.
+   - Navigasi kembali ke halaman `/pricing` via navbar $\rightarrow$ Kuota meme langsung ter-update otomatis (mis. `1 / 20 (sisa 19)`) tanpa perlu me-refresh halaman atau menekan `Ctrl + Shift + R`.
+   - Hapus meme yang dibuat $\rightarrow$ Kuota otomatis kembali tersinkronisasi.

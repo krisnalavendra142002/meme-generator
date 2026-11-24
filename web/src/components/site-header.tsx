@@ -85,10 +85,15 @@ export function SiteHeader() {
               <HoverCard openDelay={100} closeDelay={150}>
                 <HoverCardTrigger asChild>
                   <button
-                    className="cursor-pointer rounded px-2 py-1 text-sm text-muted-foreground underline-offset-4 hover:underline"
+                    className="flex cursor-pointer items-center gap-1.5 rounded px-2 py-1 text-sm text-muted-foreground underline-offset-4 hover:underline"
                     aria-label="Info akun"
                   >
-                    {user.name || user.email}
+                    <span>{user.name || user.email}</span>
+                    {sub.data?.subscribed && sub.data.planName && (
+                      <span className="rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
+                        {sub.data.planName}
+                      </span>
+                    )}
                   </button>
                 </HoverCardTrigger>
                 <HoverCardContent className="w-72" align="end">

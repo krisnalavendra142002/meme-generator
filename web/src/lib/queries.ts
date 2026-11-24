@@ -32,9 +32,8 @@ export function useSubscriptionStatus() {
     queryKey: queryKeys.subscription,
     queryFn: async () =>
       unwrap<SubscriptionStatus>(await api.get("/api/v1/subscription/status")),
-    // BUG: status dianggap abadi — setelah beli/expired, UI tidak pernah
-    // mengambil ulang sampai invalidate manual / reload penuh.
-    staleTime: Number.POSITIVE_INFINITY,
+    staleTime: 1000 * 30,
+    refetchOnWindowFocus: true,
   });
 }
 
@@ -109,7 +108,10 @@ export function useCompleteMeme() {
           resultUrl: input.resultUrl,
         }),
       ),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["memes"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["memes"] });
+      qc.invalidateQueries({ queryKey: queryKeys.subscription });
+    },
   });
 }
 
@@ -117,6 +119,9 @@ export function useDeleteMeme() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (id: string) => api.delete(`/api/v1/memes/${id}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["memes"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["memes"] });
+      qc.invalidateQueries({ queryKey: queryKeys.subscription });
+    },
   });
 }

@@ -27,6 +27,7 @@ export function useMe() {
 }
 
 export function useRegister() {
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: async (input: AuthInput) => {
       const res = await api.post<ApiEnvelope<AuthResponse>>(
@@ -34,6 +35,10 @@ export function useRegister() {
         { name: input.name, email: input.email, password: input.password },
       );
       return res.data;
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["me"] });
+      qc.invalidateQueries({ queryKey: ["subscription"] });
     },
   });
 }
@@ -48,7 +53,10 @@ export function useLogin() {
       );
       return res.data;
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["me"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["me"] });
+      qc.invalidateQueries({ queryKey: ["subscription"] });
+    },
   });
 }
 
