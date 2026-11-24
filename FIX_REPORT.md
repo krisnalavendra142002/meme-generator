@@ -538,3 +538,90 @@ Setelah ditelusuri dari interaksi komponen antarmuka (*client-side*) dan manajem
    - Masuk ke `/studio`, buat 1 meme baru hingga berhasil tersimpan.
    - Navigasi kembali ke halaman `/pricing` via navbar $\rightarrow$ Kuota meme langsung ter-update otomatis (mis. `1 / 20 (sisa 19)`) tanpa perlu me-refresh halaman atau menekan `Ctrl + Shift + R`.
    - Hapus meme yang dibuat $\rightarrow$ Kuota otomatis kembali tersinkronisasi.
+
+
+---
+
+## TKT-101: Masih Bisa Membuat Meme Padahal Paket Habis (Pengecekan Masa Aktif Langganan)
+
+### 1. Deskripsi Keluhan
+Pengguna melaporkan:
+> “Halo, aku beli paket Premium 1 Hari kemarin jam 12 siang. Lewat hampir satu jam tapi aku masih bisa upload dan render meme terus. Temenku bilang di dia udah gak bisa. Aku restart browser tadi malah normal sebentar, terus balik bisa lagi. Tolong dicek ya, aku gak mau dilabeli ngehack padahal bayar cuma 1 hari.”
+
+### 2. Investigasi & Akar Masalah (*Root Cause*)
+Setelah ditelusuri alur otorisasi pembuatan meme (`PrepareUpload`, `ResultUpload`, dan `Complete`) pada modul `meme` dan `subscription`:
+
+1. **Query `ActiveByUser` Tidak Memeriksa Batas Waktu `ends_at` (`api/internal/modules/subscription/repository.go`)**:
+   - Pengecekan hak akses membuat meme (`subscriptionGate.CanCreate`) memanggil `subSvc.Status()`, yang bergantung pada fungsi `repo.ActiveByUser()`.
+   - Pada `ActiveByUser()`, query SQL yang dijalankan adalah:
+     ```sql
+     SELECT ... FROM subscriptions s JOIN plans p ON p.id = s.plan_id
+     WHERE s.user_id = $1 AND s.status = 'active'
+     ORDER BY s.ends_at DESC LIMIT 1
+     ```
+   - Query ini **hanya** memeriksa kolom `status = 'active'` tanpa memvalidasi apakah waktu saat ini sudah melewati masa berlaku (`ends_at > now()`).
+
+2. **Ketergantungan Tunggal pada Background Janitor**:
+   - Kolom `status` di tabel `subscriptions` hanya diubah menjadi `'expired'` oleh *background janitor* (`expireJanitor` di `api/internal/app/app.go`) yang berjalan secara periodik setiap 1 jam sekali (`expireInterval = time.Hour`).
+   - Akibatnya, selama janitor belum dieksekusi (rentang waktu hingga 1 jam setelah langganan habis), langganan masih berstatus `'active'` di database, sehingga query `ActiveByUser()` tetap menganggap langganan valid. Pengguna masih dapat terus mengunggah dan merender meme hingga janitor akhirnya berjalan.
+   - Catatan pengembang di komentar kode (`// lazy check di ActiveByUser (ends_at > now()) tetap menjadi sumber kebenaran runtime`) dan query sqlc di `subscriptions.sql` (`AND s.ends_at > now()`) mengonfirmasi bahwa klausa `AND s.ends_at > now()` memang seharusnya ada di `ActiveByUser()`.
+
+---
+
+### 3. Kode yang Diubah
+
+#### Backend (`api/`)
+1. **`api/internal/modules/subscription/repository.go`**:
+   - Menambahkan klausul `AND s.ends_at > now()` pada query SQL di fungsi `ActiveByUser`.
+   - Dengan perbaikan ini, langganan yang sudah melewati `ends_at` langsung ditolak secara *real-time* saat query dieksekusi tanpa menunggu *background janitor* mengubah status.
+2. **`api/internal/modules/subscription/repository_test.go`**:
+   - Menambahkan integration test `TestRepository_ActiveByUser_FiltersExpiredSubscriptions` untuk memverifikasi bahwa langganan yang masa berlakunya telah habis (`ends_at <= now()`) mengembalikan `ErrNotSubscribed`, meskipun kolom `status` di database masih bernilai `'active'`.
+
+---
+
+### 4. Bukti Penyelesaian (*Proof of Completion*)
+
+#### A. Langkah Reproduksi Sebelum Perbaikan
+1. Masukkan data langganan yang sudah lewat masa berlaku (mis. `starts_at = now() - interval '2 days'`, `ends_at = now() - interval '1 hour'`) dengan status `'active'`.
+2. Jalankan query `ActiveByUser` lama:
+   ```sql
+   SELECT id, status, ends_at FROM subscriptions
+   WHERE user_id = '<user_id>' AND status = 'active'
+   ORDER BY ends_at DESC LIMIT 1;
+   ```
+   **Output**: Mengembalikan 1 baris (langganan dianggap masih aktif karena janitor 1 jam belum berjalan).
+3. Pengguna memanggil `POST /api/v1/memes/upload` $\rightarrow$ Mendapat status 200 OK dan presigned URL S3 (dapat membuat meme padahal paket sudah kedaluwarsa).
+
+#### B. Langkah Reproduksi Sesudah Perbaikan
+1. Jalankan unit & integration test subscription di backend:
+   ```bash
+   cd api && go test -v -run TestRepository_ActiveByUser_FiltersExpiredSubscriptions ./internal/modules/subscription
+   ```
+   **Output**:
+   ```
+   === RUN   TestRepository_ActiveByUser_FiltersExpiredSubscriptions
+   --- PASS: TestRepository_ActiveByUser_FiltersExpiredSubscriptions (0.02s)
+   PASS
+   ok      github.com/nyxsr/meme-portal/api/internal/modules/subscription  0.020s
+   ```
+2. Jalankan seluruh test backend:
+   ```bash
+   cd api && go test -v ./...
+   ```
+   **Output**:
+   ```
+   PASS (seluruh test di internal/middleware, auth, meme, subscription, cookie lulus)
+   ```
+3. Jalankan pengujian `make check`:
+   ```bash
+   make check
+   ```
+   **Output**:
+   ```
+   cd api && go build -o bin/api ./cmd/server
+   cd web && bun run check
+   $ tsc --noEmit
+   ```
+4. Uji simulasi query database:
+   - Query `ActiveByUser` baru dengan filter `AND s.ends_at > now()` mengembalikan `0 rows` (`pgx.ErrNoRows` $\rightarrow$ `ErrNotSubscribed`).
+   - Endpoint upload `/api/v1/memes/upload` langsung mengembalikan `HTTP 403 Forbidden` (`{"success":false,"code":30002,"message":"anda belum berlangganan paket aktif"}`).
