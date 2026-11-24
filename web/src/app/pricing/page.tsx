@@ -3,6 +3,7 @@
 // Pricing: daftar paket dari backend; checkout lewat payment gateway mock.
 // NOTE (scaffold): belum ada redirect/confirm UI.
 
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useCheckout, usePlans, useSubscriptionStatus } from "@/lib/queries";
 import { describeError } from "@/lib/errors";
@@ -22,6 +23,7 @@ export default function PricingPage() {
   const status = useSubscriptionStatus();
   const checkout = useCheckout();
   const router = useRouter();
+  const [pendingPlan, setPendingPlan] = useState<string | null>(null);
 
   return (
     <main className="mx-auto max-w-4xl space-y-8 p-8">
@@ -63,15 +65,18 @@ export default function PricingPage() {
               </p>
               <Button
                 className="w-full"
-                disabled={checkout.isPending}
-                onClick={() =>
+                disabled={checkout.isPending || !!pendingPlan}
+                onClick={() => {
+                  if (pendingPlan || checkout.isPending) return;
+                  setPendingPlan(plan.code);
                   checkout.mutate(plan.code, {
                     onSuccess: (res) =>
                       router.push(`/checkout/${res.payment.reference}`),
-                  })
-                }
+                    onError: () => setPendingPlan(null),
+                  });
+                }}
               >
-                {checkout.isPending && checkout.variables === plan.code
+                {checkout.isPending || pendingPlan === plan.code
                   ? "Memproses..."
                   : "Berlangganan"}
               </Button>

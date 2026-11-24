@@ -29,8 +29,8 @@ func TestSet(t *testing.T) {
 	if c.MaxAge != 900 {
 		t.Errorf("expected max-age 900, got %d", c.MaxAge)
 	}
-	if c.HttpOnly {
-		t.Errorf("expected HttpOnly false, got true")
+	if !c.HttpOnly {
+		t.Errorf("expected HttpOnly true, got false")
 	}
 }
 
@@ -54,8 +54,8 @@ func TestClear(t *testing.T) {
 		if c.Value != "" {
 			t.Errorf("expected cookie %s to have empty value, got %s", c.Name, c.Value)
 		}
-		if c.HttpOnly {
-			t.Errorf("expected cookie %s to have HttpOnly false, got true", c.Name)
+		if !c.HttpOnly {
+			t.Errorf("expected cookie %s to have HttpOnly true, got false", c.Name)
 		}
 	}
 }

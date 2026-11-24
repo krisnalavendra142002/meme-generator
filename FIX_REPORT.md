@@ -35,12 +35,13 @@ Setelah ditelusuri dari alur logout di backend sampai proteksi halaman di fronte
 
 #### A. Backend
 1. **`api/internal/platform/cookie/cookie.go`**:
-   - Memperbaiki `cookie.Clear` agar menggunakan `Path: "/"` dan atribut `HttpOnly: false` agar sama persis dengan saat cookie dibuat (`cookie.Set`).
+   - Mengatur `HttpOnly: true` pada `cookie.Set` dan `cookie.Clear` untuk mengamankan cookie auth (access dan refresh token) dari akses skrip jahat/XSS.
+   - Memastikan `cookie.Clear` menggunakan `Path: "/"` konsisten dengan `Set` agar cookie terhapus tuntas dari browser.
 2. **`api/internal/modules/auth/handler.go`**:
    - Mengubah `clearAuthCookies` agar menggunakan helper `cookie.Clear` dengan `Path: "/"`.
    - Memastikan `clearAuthCookies` tetap dijalankan meskipun konteks auth sudah tidak valid, supaya browser tetap membersihkan sisa cookie.
 3. **`api/internal/platform/cookie/cookie_test.go` & `api/internal/modules/auth/handler_test.go`**:
-   - Menambahkan unit test untuk memastikan atribut `Path`, nilai kosong, dan `MaxAge: -1` terpasang dengan benar pada response header saat logout.
+   - Menambahkan unit test untuk memastikan atribut `HttpOnly: true`, `Path: "/"`, nilai kosong, dan `MaxAge: -1` terpasang dengan benar pada response header saat logout dan login.
 
 #### B. Frontend
 1. **`web/src/app/page.tsx`**:
@@ -141,10 +142,9 @@ Setelah ditelusuri dari alur checkout di frontend dan backend:
 
 #### B. Frontend
 1. **`web/src/lib/queries.ts`**:
-   - Menyimpan `idempotencyKey` menggunakan `useRef<Map<string, string>>` per `planCode` sehingga pengulangan mutasi/retry untuk plan yang sama menggunakan key yang identik.
-   - Membersihkan key pada saat checkout berhasil (`onSuccess`).
+   - Menyimpan `idempotencyKey` secara persisten menggunakan `planIdempotencyKeys = new Map<string, string>()` per `planCode` sehingga pengulangan mutasi, double click, maupun retry untuk plan yang sama selalu menggunakan key yang identik dan tidak terhapus prematur.
 2. **`web/src/app/pricing/page.tsx`**:
-   - Menambahkan `disabled={checkout.isPending}` pada tombol "Berlangganan".
+   - Menambahkan state `pendingPlan` dan properti `disabled={checkout.isPending || !!pendingPlan}` pada tombol "Berlangganan" untuk mencegah trigger ganda secara sinkron di level UI.
    - Menampilkan label `"Memproses..."` ketika mutasi untuk paket terkait sedang aktif.
 
 ---
@@ -832,12 +832,13 @@ Setelah menelusuri alur unggah gambar (*upload flow*) dari frontend ke backend h
 1. **`api/internal/modules/meme/consts.go`**:
    - Menambahkan konstanta `maxUploadSize = 10 * 1024 * 1024` (batas maksimum upload 10 MB per gambar).
 2. **`api/internal/modules/meme/handler.go`**:
-   - Menambahkan field `Size int64` pada `prepareUploadDTO`.
-   - Mengirimkan `dto.Size` ke `service.PrepareUpload`.
+   - Menambahkan field `Size int64`, `FileSize int64`, `FileSizeSnake int64`, dan `ContentLength int64` pada `prepareUploadDTO` untuk menangkap variasi parameter ukuran dari berbagai klien.
+   - Mengirimkan ukuran yang terdeteksi ke `service.PrepareUpload`.
    - Menangani pemetaan error `ErrInvalidFile` ke response HTTP 400 Bad Request dengan `CodeInvalidImage` (30002).
 3. **`api/internal/modules/meme/service.go`**:
    - Memvalidasi ekstensi file menggunakan `allowedExt(ext)`. Menolak dengan `ErrInvalidFile` jika format tidak didukung (.zip, .exe, .html, dsb.).
-   - Memvalidasi ukuran file: menolak jika `size < 0 || size > maxUploadSize` (melebihi 10 MB atau ukuran negatif). Jika klien tidak mengirimkan size (ukuran bernilai 0 / default dari klien lama/baseline runner), permintaan tetap diizinkan namun tanpa Content-Length paksaan pada presigned PUT URL.
+   - Memvalidasi ukuran file di `PrepareUpload`: menolak jika `size < 0 || size > maxUploadSize` (melebihi 10 MB atau ukuran negatif).
+   - Menambahkan verifikasi ukuran objek aktual di S3 pada method `ResultUpload` dan `Complete` via `HeadObject`. Jika file dasar yang diunggah ke storage melebihi 10 MB (misal 11 MB), objek otomatis dihapus dari S3 dan permintaan ditolak dengan `ErrInvalidFile`.
    - Menambahkan fungsi `canonicalContentType(ext, clientContentType)` untuk memvalidasi dan menyelaraskan MIME type yang sah (`image/jpeg`, `image/png`, `image/gif`, `image/webp`) serta menolak tipe berbahaya seperti HTML, script, maupun executable.
    - Menyematkan `ContentType` hasil kanonikal dan `ContentLength` (jika size > 0) ke dalam `s3.PutObjectInput` pada pembuatan Presigned PUT URL.
 4. **`api/internal/modules/meme/handler_test.go`**:

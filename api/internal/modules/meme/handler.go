@@ -21,10 +21,13 @@ func NewHandler(service *Service) *Handler {
 }
 
 type prepareUploadDTO struct {
-	Title       string `json:"title"`
-	Filename    string `json:"filename"`
-	ContentType string `json:"contentType"`
-	Size        int64  `json:"size"`
+	Title         string `json:"title"`
+	Filename      string `json:"filename"`
+	ContentType   string `json:"contentType"`
+	Size          int64  `json:"size"`
+	FileSize      int64  `json:"fileSize"`
+	FileSizeSnake int64  `json:"file_size"`
+	ContentLength int64  `json:"contentLength"`
 }
 
 // PrepareUpload: user minta URL upload untuk gambar dasarnya.
@@ -39,8 +42,18 @@ func (h *Handler) PrepareUpload(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, http.StatusBadRequest, response.CodeInvalidRequestBody, "invalid request body")
 		return
 	}
+	size := dto.Size
+	if size == 0 {
+		if dto.FileSize > 0 {
+			size = dto.FileSize
+		} else if dto.FileSizeSnake > 0 {
+			size = dto.FileSizeSnake
+		} else if dto.ContentLength > 0 {
+			size = dto.ContentLength
+		}
+	}
 	ext := path.Ext(dto.Filename)
-	res, err := h.service.PrepareUpload(r.Context(), userID, dto.Title, ext, dto.ContentType, dto.Size)
+	res, err := h.service.PrepareUpload(r.Context(), userID, dto.Title, ext, dto.ContentType, size)
 	if err != nil {
 		writeError(w, err)
 		return

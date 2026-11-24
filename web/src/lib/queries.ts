@@ -1,4 +1,3 @@
-import { useRef } from "react";
 import {
   useMutation,
   useQuery,
@@ -37,16 +36,17 @@ export function useSubscriptionStatus() {
   });
 }
 
+const planIdempotencyKeys = new Map<string, string>();
+
 export function useCheckout() {
   const qc = useQueryClient();
-  const keysRef = useRef<Map<string, string>>(new Map());
 
   return useMutation({
     mutationFn: async (planCode: string) => {
-      let key = keysRef.current.get(planCode);
+      let key = planIdempotencyKeys.get(planCode);
       if (!key) {
         key = crypto.randomUUID();
-        keysRef.current.set(planCode, key);
+        planIdempotencyKeys.set(planCode, key);
       }
       return unwrap<CheckoutResponse>(
         await api.post(
@@ -60,8 +60,7 @@ export function useCheckout() {
         ),
       );
     },
-    onSuccess: (_data, planCode) => {
-      keysRef.current.delete(planCode);
+    onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.subscription });
     },
   });

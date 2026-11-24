@@ -14,7 +14,7 @@ func Set(w http.ResponseWriter, name, value string, maxAge int, secure bool) {
 		Value:    value,
 		Path:     "/",
 		MaxAge:   maxAge,
-		HttpOnly: false, // sengaja false agar document.cookie bisa membacanya
+		HttpOnly: true,
 		Secure:   secure,
 		SameSite: http.SameSiteLaxMode,
 	})
@@ -26,7 +26,7 @@ func Clear(w http.ResponseWriter, name string) {
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
-		HttpOnly: false,
+		HttpOnly: true,
 		Secure:   false,
 		SameSite: http.SameSiteLaxMode,
 	})

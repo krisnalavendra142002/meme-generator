@@ -78,6 +78,9 @@ func (s *Service) PrepareUpload(ctx context.Context, userID, title, ext, content
 // ResultUpload mengembalikan presigned PUT URL untuk gambar hasil render
 // (canvas) milik meme <id>; complete kemudian menyimpan URL publiknya.
 func (s *Service) ResultUpload(ctx context.Context, userID, id string) (UploadResponse, error) {
+	if err := s.checkAndEnforceBaseImageSize(ctx, userID, id); err != nil {
+		return UploadResponse{}, err
+	}
 	if _, err := s.repo.GetByID(ctx, id, userID); err != nil {
 		return UploadResponse{}, err
 	}
@@ -96,7 +99,51 @@ func (s *Service) ResultUpload(ctx context.Context, userID, id string) (UploadRe
 }
 
 func (s *Service) Complete(ctx context.Context, userID, id, resultURL string) (Meme, error) {
+	if err := s.checkAndEnforceBaseImageSize(ctx, userID, id); err != nil {
+		return Meme{}, err
+	}
 	return s.repo.SetResultURL(ctx, id, userID, resultURL)
+}
+
+func (s *Service) checkAndEnforceBaseImageSize(ctx context.Context, userID, id string) error {
+	if s.s3 == nil {
+		return nil
+	}
+	m, err := s.repo.GetByID(ctx, id, userID)
+	if err != nil {
+		return err
+	}
+	baseKey := s.extractKey(m.BaseImageURL)
+	if baseKey == "" {
+		return nil
+	}
+	head, err := s.s3.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: &s.bucket,
+		Key:    &baseKey,
+	})
+	if err == nil && head.ContentLength != nil && *head.ContentLength > maxUploadSize {
+		_, _ = s.s3.DeleteObject(ctx, &s3.DeleteObjectInput{
+			Bucket: &s.bucket,
+			Key:    &baseKey,
+		})
+		_ = s.repo.Delete(ctx, id, userID)
+		return ErrInvalidFile
+	}
+	return nil
+}
+
+func (s *Service) extractKey(rawURL string) string {
+	if s.baseURL != "" && strings.HasPrefix(rawURL, s.baseURL) {
+		trimmed := strings.TrimPrefix(rawURL, s.baseURL)
+		return strings.TrimPrefix(trimmed, "/")
+	}
+	if idx := strings.Index(rawURL, "/base/"); idx != -1 {
+		return rawURL[idx+1:]
+	}
+	if strings.HasPrefix(rawURL, "base/") {
+		return rawURL
+	}
+	return ""
 }
 
 func (s *Service) Get(ctx context.Context, userID, id string) (Meme, error) {
