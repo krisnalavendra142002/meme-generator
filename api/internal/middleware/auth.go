@@ -19,6 +19,11 @@ func UserIDFromContext(ctx context.Context) (string, bool) {
 	return id, ok && id != ""
 }
 
+// ContextWithUserID mengembalikan context baru dengan user id terpasang.
+func ContextWithUserID(ctx context.Context, userID string) context.Context {
+	return context.WithValue(ctx, ctxKeyUserID, userID)
+}
+
 // Auth memvalidasi access token dari header Authorization: Bearer <token>,
 // atau fallback ke cookie meme_access_token (sesi berbasis cookie HttpOnly).
 func Auth(tokens *token.Manager) func(http.Handler) http.Handler {

@@ -63,6 +63,7 @@ export default function PricingPage() {
               </p>
               <Button
                 className="w-full"
+                disabled={checkout.isPending}
                 onClick={() =>
                   checkout.mutate(plan.code, {
                     onSuccess: (res) =>
@@ -70,7 +71,9 @@ export default function PricingPage() {
                   })
                 }
               >
-                Berlangganan
+                {checkout.isPending && checkout.variables === plan.code
+                  ? "Memproses..."
+                  : "Berlangganan"}
               </Button>
             </CardContent>
           </Card>

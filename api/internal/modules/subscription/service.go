@@ -54,6 +54,10 @@ func (s *Service) Checkout(ctx context.Context, userID string, dto CheckoutDTO, 
 	reference := token.RandomHex(12)
 	sub, pay, err := s.repo.CreateSubscription(ctx, userID, plan, reference, idempotencyKey)
 	if err != nil {
+		// Jika terjadi race condition (key sudah dibuat oleh request paralel), ambil checkout yang sudah ada
+		if prev, ok, lookupErr := s.repo.CheckoutByIdempotencyKey(ctx, idempotencyKey); lookupErr == nil && ok {
+			return prev, nil
+		}
 		return CheckoutResponse{}, err
 	}
 	url, err := s.gateway.CreateCharge(ctx, pay.AmountIDR, reference)
